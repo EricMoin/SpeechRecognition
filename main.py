@@ -97,34 +97,39 @@ def load_speaker_data(data_dir):
 
 # 2. 特征提取函数
 def extract_mfcc_features(audio_file, n_mfcc=13, n_fft=2048, hop_length=512):
-    """
-    从音频文件中提取MFCC特征
-    
-    Args:
-        audio_file: 音频文件路径
-        n_mfcc: MFCC系数数量
-        n_fft: FFT窗口大小
-        hop_length: 帧移大小
-        
-    Returns:
-        mfcc_features: MFCC特征
-    """
-    # 加载音频文件
-    # sr=None ：保留原始采样率（不进行重采样）。
     audio, sr = librosa.load(audio_file, sr=None)
     
-    # 提取MFCC特征
-    # @n_mfcc ：MFCC 系数数量（默认 13，对应语音的基频特征）。
-    # @n_fft ：FFT 窗口大小（2048 对应约 93 ms 的音频片段，适用于语音信号）。
-    # @hop_length ：帧移步长（512 对应 ~23 ms 的时间步长）。
-    mfcc_features = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc, 
-                                         n_fft=n_fft, hop_length=hop_length)
+    # MFCC及其差分
+    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
+    delta = librosa.feature.delta(mfcc)
+    delta2 = librosa.feature.delta(mfcc, order=2)
     
-    # 计算MFCC特征的均值，得到固定长度的特征向量
-    # 均值池化的作用 :固定长度特征,不同音频文件的时长不同，直接取均值可将特征压缩为固定长度向量
-    mfcc_features = np.mean(mfcc_features, axis=1)
+    # 梅尔频谱能量
+    # mel_spectrogram = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=n_fft, hop_length=hop_length)
+    # log_mel = librosa.power_to_db(mel_spectrogram, ref=np.max)
     
-    return mfcc_features
+    # 过零率
+    # zcr = librosa.feature.zero_crossing_rate(audio, frame_length=n_fft, hop_length=hop_length)
+    
+    # 能量
+    # rms = librosa.feature.rms(y=audio, frame_length=n_fft, hop_length=hop_length)
+    
+    # 合并所有特征
+    features = np.concatenate([
+        mfcc,
+        delta,
+        delta2,
+        # log_mel,
+        # zcr,
+        # rms
+    ], axis=0)
+    
+    # 统计池化（均值 + 标准差）
+    features_mean = np.mean(features, axis=1)
+    features_std = np.std(features, axis=1)
+    features = np.concatenate([features_mean, features_std])
+    
+    return features
 
 # 3. 提取所有说话人的特征
 def extract_features_for_all_speakers(speakers_data, feature_function):
@@ -265,7 +270,7 @@ if __name__ == "__main__":
     test_data, test_speakers = load_speaker_data(TestDir)
     
     # 特征提取参数 - 存储参数而不是函数
-    mfcc_params = {"n_mfcc": 128, "n_fft": 2048, "hop_length": 512}
+    mfcc_params = {"n_mfcc": 20, "n_fft": 2048, "hop_length": 512}
     
     # 特征提取函数 - 使用较少的MFCC系数
     feature_function = lambda x: extract_mfcc_features(x, **mfcc_params)
@@ -274,7 +279,7 @@ if __name__ == "__main__":
     train_features = extract_features_for_all_speakers(train_data, feature_function)
     
     print("训练GMM模型...")
-    gmm_models = train_gmm_models(train_features, n_components=4, reg_covar=1e-1)  # 降低组件数量，增加正则化
+    gmm_models = train_gmm_models(train_features, n_components=1, reg_covar=1e-1)  # 降低组件数量，增加正则化
     
     print("评估模型...")
     accuracy, true_labels, pred_labels = evaluate_model(test_data, gmm_models, feature_function)
