@@ -110,13 +110,18 @@ def extract_mfcc_features(audio_file, n_mfcc=13, n_fft=2048, hop_length=512):
         mfcc_features: MFCC特征
     """
     # 加载音频文件
+    # sr=None ：保留原始采样率（不进行重采样）。
     audio, sr = librosa.load(audio_file, sr=None)
     
     # 提取MFCC特征
+    # @n_mfcc ：MFCC 系数数量（默认 13，对应语音的基频特征）。
+    # @n_fft ：FFT 窗口大小（2048 对应约 93 ms 的音频片段，适用于语音信号）。
+    # @hop_length ：帧移步长（512 对应 ~23 ms 的时间步长）。
     mfcc_features = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc, 
                                          n_fft=n_fft, hop_length=hop_length)
     
     # 计算MFCC特征的均值，得到固定长度的特征向量
+    # 均值池化的作用 :固定长度特征,不同音频文件的时长不同，直接取均值可将特征压缩为固定长度向量
     mfcc_features = np.mean(mfcc_features, axis=1)
     
     return mfcc_features
@@ -133,6 +138,9 @@ def extract_features_for_all_speakers(speakers_data, feature_function):
     Returns:
         features_dict: 包含所有说话人特征的字典
     """
+    # 创建一个字典来存储所有说话人的特征
+    # 每个说话人对应一个特征列表，列表长度等于其音频文件数量。
+    # 每个特征向量的形状由 feature_function 决定（如 MFCC 的 13 维向量）
     features_dict = {}
     
     for speaker_id, audio_files in tqdm(speakers_data.items(), desc="提取特征"):
@@ -167,36 +175,24 @@ def train_gmm_models(features_dict, n_components=8, reg_covar=1e-2):
         # GMM组件数量不能超过样本数量
         actual_n_components = min(n_components, max(1, X.shape[0] - 1))  # 至少保留1个组件，且不超过样本数-1
         if actual_n_components < n_components:
-            print(f"警告: 说话人 {speaker_id} 的样本数量为 {X.shape[0]}，调整组件数量为 {actual_n_components}。")
-        
-        # 检查特征是否包含NaN或无限值
-        if np.isnan(X).any() or np.isinf(X).any():
-            print(f"警告: 说话人 {speaker_id} 的特征包含NaN或无限值，已替换为0")
-            X = np.nan_to_num(X)
+            raise ValueError(f"组件数量为 {actual_n_components}，与样本数量不一致: {X.shape[0]}")
         
         # 训练GMM模型，增加正则化参数
-        try:
-            gmm = GaussianMixture(
+        # GMM
+        # @n_components ：组件数量越大，模型复杂度越高
+        # covariance_type ：
+        # @diag ：协方差矩阵为对角阵（计算快，假设特征间无相关性）。
+        # @full ：协方差矩阵为全矩阵（更灵活，但参数更多）。
+        # @reg_covar ：协方差矩阵的正则化项（防止数值不稳定，如协方差为零）
+        gmm = GaussianMixture(
                 n_components=actual_n_components, 
                 covariance_type='diag',
                 random_state=42, 
                 max_iter=200,
                 reg_covar=reg_covar  # 增加协方差正则化参数
             )
-            gmm.fit(X.reshape(X.shape[0], -1))
-            gmm_models[speaker_id] = gmm
-        except Exception as e:
-            print(f"错误: 无法为说话人 {speaker_id} 训练GMM模型: {str(e)}")
-            # 使用单高斯模型作为后备选项
-            gmm = GaussianMixture(
-                n_components=1, 
-                covariance_type='full',
-                random_state=42, 
-                max_iter=200,
-                reg_covar=reg_covar*10  # 更强的正则化
-            )
-            gmm.fit(X.reshape(X.shape[0], -1))
-            gmm_models[speaker_id] = gmm
+        gmm.fit(X.reshape(X.shape[0], -1))
+        gmm_models[speaker_id] = gmm
     
     return gmm_models
 
@@ -220,6 +216,7 @@ def recognize_speaker(audio_file, gmm_models, feature_function):
     # 计算每个说话人模型的得分
     scores = {}
     for speaker_id, gmm in gmm_models.items():
+        # score = log(P(audio | model))，概率越高，得分越大。
         scores[speaker_id] = gmm.score(features.reshape(1, -1))
     
     # 选择得分最高的说话人
@@ -268,7 +265,7 @@ if __name__ == "__main__":
     test_data, test_speakers = load_speaker_data(TestDir)
     
     # 特征提取参数 - 存储参数而不是函数
-    mfcc_params = {"n_mfcc": 13, "n_fft": 2048, "hop_length": 512}
+    mfcc_params = {"n_mfcc": 128, "n_fft": 2048, "hop_length": 512}
     
     # 特征提取函数 - 使用较少的MFCC系数
     feature_function = lambda x: extract_mfcc_features(x, **mfcc_params)
@@ -333,7 +330,7 @@ if __name__ == "__main__":
     # 实验不同特征提取方法
     # print("\n比较不同特征提取方法...")
     
-    # # 定义不同的特征提取函数
+    # # # 定义不同的特征提取函数
     # def extract_mfcc_delta_features(audio_file):
     #     """提取MFCC及其一阶和二阶差分特征"""
     #     audio, sr = librosa.load(audio_file, sr=None)
