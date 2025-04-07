@@ -36,6 +36,14 @@ from tqdm import tqdm
 import pickle
 import seaborn as sns
 
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # 指定默认中文字体
+plt.rcParams['axes.unicode_minus'] = False    # 解决负号显示问题
+
+
+os.environ["LOKY_MAX_CPU_COUNT"] = "4"
+
+
+
 # 可以根据需要导入其他库，比如librosa用于音频处理
 # 数据集基本信息如下
 # 方言地区：DR1～DR8
@@ -323,83 +331,81 @@ if __name__ == "__main__":
     # plt.savefig('gmm_components_comparison.png')
     
     # 实验不同特征提取方法
-    print("\n比较不同特征提取方法...")
+    # print("\n比较不同特征提取方法...")
     
-    # 定义不同的特征提取函数
-    def extract_mfcc_delta_features(audio_file):
-        """提取MFCC及其一阶和二阶差分特征"""
-        audio, sr = librosa.load(audio_file, sr=None)
-        mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
-        delta = librosa.feature.delta(mfcc)
-        delta2 = librosa.feature.delta(mfcc, order=2)
-        combined = np.vstack([np.mean(mfcc, axis=1), np.mean(delta, axis=1), np.mean(delta2, axis=1)])
-        return combined.flatten()
+    # # 定义不同的特征提取函数
+    # def extract_mfcc_delta_features(audio_file):
+    #     """提取MFCC及其一阶和二阶差分特征"""
+    #     audio, sr = librosa.load(audio_file, sr=None)
+    #     mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+    #     delta = librosa.feature.delta(mfcc)
+    #     delta2 = librosa.feature.delta(mfcc, order=2)
+    #     combined = np.vstack([np.mean(mfcc, axis=1), np.mean(delta, axis=1), np.mean(delta2, axis=1)])
+    #     return combined.flatten()
     
-    def extract_spectral_features(audio_file):
-        """提取频谱特征"""
-        audio, sr = librosa.load(audio_file, sr=None)
-        # 提取短时傅里叶变换
-        stft = np.abs(librosa.stft(audio))
+    # def extract_spectral_features(audio_file):
+    #     """提取频谱特征"""
+    #     audio, sr = librosa.load(audio_file, sr=None)
+    #     # 提取短时傅里叶变换
+    #     stft = np.abs(librosa.stft(audio))
         
-        # 计算频谱质心
-        cent = librosa.feature.spectral_centroid(S=stft, sr=sr)
-        # 计算频谱平展度
-        flat = librosa.feature.spectral_flatness(S=stft)
-        # 计算频谱对比度
-        contrast = librosa.feature.spectral_contrast(S=stft, sr=sr)
+    #     # 计算频谱质心
+    #     cent = librosa.feature.spectral_centroid(S=stft, sr=sr)
+    #     # 计算频谱平展度
+    #     flat = librosa.feature.spectral_flatness(S=stft)
+    #     # 计算频谱对比度
+    #     contrast = librosa.feature.spectral_contrast(S=stft, sr=sr)
         
-        # 计算均值 - 修复不同维度的问题
-        centroid_mean = np.mean(cent, axis=1)           # 形状为 (1,)
-        flatness_mean = np.mean(flat, axis=1)           # 形状为 (1,)
-        contrast_mean = np.mean(contrast, axis=1)       # 形状为 (7,) 对于部分音频
+    #     # 计算均值 - 修复不同维度的问题
+    #     centroid_mean = np.mean(cent, axis=1)           # 形状为 (1,)
+    #     flatness_mean = np.mean(flat, axis=1)           # 形状为 (1,)
+    #     contrast_mean = np.mean(contrast, axis=1)       # 形状为 (7,) 对于部分音频
         
-        # 将所有特征展平并连接
-        features = np.concatenate([centroid_mean, flatness_mean, contrast_mean])
+    #     # 将所有特征展平并连接
+    #     features = np.concatenate([centroid_mean, flatness_mean, contrast_mean])
         
-        return features
+    #     return features
     
     # 定义要比较的特征提取方法
-    feature_methods = {
-        "MFCC": lambda x: extract_mfcc_features(x, **mfcc_params),
-        "MFCC+Delta": extract_mfcc_delta_features,
-        "Spectral": extract_spectral_features
-    }
+    # feature_methods = {
+    #     "MFCC": lambda x: extract_mfcc_features(x, **mfcc_params),
+    #     "MFCC+Delta": extract_mfcc_delta_features,
+    #     "Spectral": extract_spectral_features
+    # }
     
     # 比较不同特征提取方法
-    feature_accuracies = {}
+    # feature_accuracies = {}
     
-    for method_name, method_func in feature_methods.items():
-        print(f"\n使用 {method_name} 特征...")
+    # for method_name, method_func in feature_methods.items():
+    #     print(f"\n使用 {method_name} 特征...")
         
-        print("提取训练数据特征...")
-        train_features = extract_features_for_all_speakers(train_data, method_func)
+    #     print("提取训练数据特征...")
+    #     train_features = extract_features_for_all_speakers(train_data, method_func)
         
-        print("训练GMM模型...")
-        gmm_models = train_gmm_models(train_features, n_components=4, reg_covar=1e-1)
+    #     print("训练GMM模型...")
+    #     gmm_models = train_gmm_models(train_features, n_components=4, reg_covar=1e-1)
         
-        print("评估模型...")
-        accuracy, _, _ = evaluate_model(test_data, gmm_models, method_func)
-        feature_accuracies[method_name] = accuracy
+    #     print("评估模型...")
+    #     accuracy, _, _ = evaluate_model(test_data, gmm_models, method_func)
+    #     feature_accuracies[method_name] = accuracy
         
-        print(f"特征方法: {method_name}, 准确率: {accuracy*100:.2f}%")
+    #     print(f"特征方法: {method_name}, 准确率: {accuracy*100:.2f}%")
     
     # 绘制不同特征方法的准确率比较图
-    plt.figure(figsize=(10, 6))
-    methods = list(feature_accuracies.keys())
-    accs = [feature_accuracies[m] for m in methods]
+    # plt.figure(figsize=(10, 6))
+    # methods = list(feature_accuracies.keys())
+    # accs = [feature_accuracies[m] for m in methods]
     
-    plt.bar(methods, accs)
-    plt.title('不同特征提取方法的准确率比较')
-    plt.xlabel('特征提取方法')
-    plt.ylabel('准确率')
-    plt.ylim(0, 1)
+    # plt.bar(methods, accs)
+    # plt.title('不同特征提取方法的准确率比较')
+    # plt.xlabel('特征提取方法')
+    # plt.ylabel('准确率')
+    # plt.ylim(0, 1)
     
     # 在柱状图上添加准确率标签
-    for i, v in enumerate(accs):
-        plt.text(i, v + 0.02, f'{v*100:.2f}%', ha='center')
+    # for i, v in enumerate(accs):
+    #     plt.text(i, v + 0.02, f'{v*100:.2f}%', ha='center')
     
-    plt.tight_layout()
-    plt.savefig('feature_methods_comparison.png')
-    
-    print("\n实验完成！")
+    # plt.tight_layout()
+    # plt.savefig('feature_methods_comparison.png')
 
