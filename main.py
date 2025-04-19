@@ -23,7 +23,7 @@
 #   - 3.通过实验对比、分析和可视化，撰写详细的实验报告，包括实验目的、实验方法、结果分析和结论。
 #   - 4.实验报告应以清晰、逻辑性强的形式呈现，图表和结果应清楚明了。
 
-## 导入必要的库
+# 导入必要的库
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -43,7 +43,6 @@ plt.rcParams['axes.unicode_minus'] = False    # 解决负号显示问题
 os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 
 
-
 # 可以根据需要导入其他库，比如librosa用于音频处理
 # 数据集基本信息如下
 # 方言地区：DR1～DR8
@@ -54,66 +53,71 @@ os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 # 上述链接下载的数据集已经
 TrainDir = "Dataset/TRAIN"
 TestDir = "Dataset/TEST"
-## 请在这里写代码加载我们划分好的TIMIT训练集和测试集。或者原始完整版数据集。
+# 请在这里写代码加载我们划分好的TIMIT训练集和测试集。或者原始完整版数据集。
 
 # 1. 数据加载函数
+
+
 def load_speaker_data(data_dir):
     """
     加载所有说话人的音频数据和对应的标签
-    
+
     Args:
         data_dir: 数据目录路径
-        
+
     Returns:
         speakers_data: 包含所有说话人音频路径的字典
         speakers_list: 所有说话人ID的列表
     """
     speakers_data = {}
-    
+
     # 遍历所有方言区域
     for dialect_region in os.listdir(data_dir):
         dialect_path = os.path.join(data_dir, dialect_region)
         if not os.path.isdir(dialect_path):
             continue
-            
+
         # 遍历每个说话人
         for speaker_id in os.listdir(dialect_path):
             speaker_path = os.path.join(dialect_path, speaker_id)
             if not os.path.isdir(speaker_path):
                 continue
-                
+
             # 获取说话人的所有音频文件
             audio_files = glob.glob(os.path.join(speaker_path, "*.wav"))
-            
+
             if speaker_id not in speakers_data:
                 speakers_data[speaker_id] = []
-                
+
             speakers_data[speaker_id].extend(audio_files)
-    
+
     speakers_list = list(speakers_data.keys())
     print(f"共加载了 {len(speakers_list)} 个说话人的数据")
-    
+
     return speakers_data, speakers_list
 
 # 2. 特征提取函数
+
+
 def extract_mfcc_features(audio_file, n_mfcc=13, n_fft=2048, hop_length=512):
     audio, sr = librosa.load(audio_file, sr=None)
-    
+
     # MFCC及其差分
-    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
+    mfcc = librosa.feature.mfcc(
+        y=audio, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
     delta = librosa.feature.delta(mfcc)
     delta2 = librosa.feature.delta(mfcc, order=2)
-    
+
     # 梅尔频谱能量
     # mel_spectrogram = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=n_fft, hop_length=hop_length)
     # log_mel = librosa.power_to_db(mel_spectrogram, ref=np.max)
-    
+
     # 过零率
     # zcr = librosa.feature.zero_crossing_rate(audio, frame_length=n_fft, hop_length=hop_length)
-    
+
     # 能量
     # rms = librosa.feature.rms(y=audio, frame_length=n_fft, hop_length=hop_length)
-    
+
     # 合并所有特征
     features = np.concatenate([
         mfcc,
@@ -123,23 +127,25 @@ def extract_mfcc_features(audio_file, n_mfcc=13, n_fft=2048, hop_length=512):
         # zcr,
         # rms
     ], axis=0)
-    
+
     # 统计池化（均值 + 标准差）
     features_mean = np.mean(features, axis=1)
     features_std = np.std(features, axis=1)
     features = np.concatenate([features_mean, features_std])
-    
+
     return features
 
 # 3. 提取所有说话人的特征
+
+
 def extract_features_for_all_speakers(speakers_data, feature_function):
     """
     为所有说话人提取特征
-    
+
     Args:
         speakers_data: 包含所有说话人音频路径的字典
         feature_function: 特征提取函数
-        
+
     Returns:
         features_dict: 包含所有说话人特征的字典
     """
@@ -147,41 +153,45 @@ def extract_features_for_all_speakers(speakers_data, feature_function):
     # 每个说话人对应一个特征列表，列表长度等于其音频文件数量。
     # 每个特征向量的形状由 feature_function 决定（如 MFCC 的 13 维向量）
     features_dict = {}
-    
+
     for speaker_id, audio_files in tqdm(speakers_data.items(), desc="提取特征"):
         features_dict[speaker_id] = []
-        
+
         for audio_file in audio_files:
             features = feature_function(audio_file)
             features_dict[speaker_id].append(features)
-    
+
     return features_dict
 
 # 4. 训练GMM模型
+
+
 def train_gmm_models(features_dict, n_components=8, reg_covar=1e-2):
     """
     为每个说话人训练GMM模型
-    
+
     Args:
         features_dict: 包含所有说话人特征的字典
         n_components: GMM组件数量
         reg_covar: 协方差矩阵正则化参数
-        
+
     Returns:
         gmm_models: 包含所有说话人GMM模型的字典
     """
     gmm_models = {}
-    
+
     for speaker_id, features in tqdm(features_dict.items(), desc="训练GMM模型"):
         # 将特征列表转换为二维数组
         X = np.array(features)
-        
+
         # 根据样本数量动态调整组件数量
         # GMM组件数量不能超过样本数量
-        actual_n_components = min(n_components, max(1, X.shape[0] - 1))  # 至少保留1个组件，且不超过样本数-1
+        actual_n_components = min(n_components, max(
+            1, X.shape[0] - 1))  # 至少保留1个组件，且不超过样本数-1
         if actual_n_components < n_components:
-            raise ValueError(f"组件数量为 {actual_n_components}，与样本数量不一致: {X.shape[0]}")
-        
+            raise ValueError(
+                f"组件数量为 {actual_n_components}，与样本数量不一致: {X.shape[0]}")
+
         # 训练GMM模型，增加正则化参数
         # GMM
         # @n_components ：组件数量越大，模型复杂度越高
@@ -190,55 +200,59 @@ def train_gmm_models(features_dict, n_components=8, reg_covar=1e-2):
         # @full ：协方差矩阵为全矩阵（更灵活，但参数更多）。
         # @reg_covar ：协方差矩阵的正则化项（防止数值不稳定，如协方差为零）
         gmm = GaussianMixture(
-                n_components=actual_n_components, 
-                covariance_type='diag',
-                random_state=42, 
-                max_iter=200,
-                reg_covar=reg_covar  # 增加协方差正则化参数
-            )
+            n_components=actual_n_components,
+            covariance_type='diag',
+            random_state=42,
+            max_iter=200,
+            reg_covar=reg_covar  # 增加协方差正则化参数
+        )
         gmm.fit(X.reshape(X.shape[0], -1))
         gmm_models[speaker_id] = gmm
-    
+
     return gmm_models
 
 # 5. 识别说话人
+
+
 def recognize_speaker(audio_file, gmm_models, feature_function):
     """
     识别给定音频的说话人
-    
+
     Args:
         audio_file: 音频文件路径
         gmm_models: 包含所有说话人GMM模型的字典
         feature_function: 特征提取函数
-        
+
     Returns:
         recognized_speaker: 识别出的说话人ID
         scores: 所有说话人的得分
     """
     # 提取特征
     features = feature_function(audio_file)
-    
+
     # 计算每个说话人模型的得分
     scores = {}
     for speaker_id, gmm in gmm_models.items():
         # score = log(P(audio | model))，概率越高，得分越大。
         scores[speaker_id] = gmm.score(features.reshape(1, -1))
-    
+
     # 选择得分最高的说话人
     recognized_speaker = max(scores, key=scores.get)
-    
+
     return recognized_speaker, scores
 
 # 6. 评估模型
+
+
 def evaluate_model(test_data, gmm_models, feature_function):
     """
     评估模型在测试集上的性能
-    
+
     Args:
         test_data: 测试数据集
         gmm_models: 包含所有说话人GMM模型的字典
         feature_function: 特征提取函数
-        
+
     Returns:
         accuracy: 准确率
         true_labels: 真实标签列表
@@ -246,56 +260,63 @@ def evaluate_model(test_data, gmm_models, feature_function):
     """
     true_labels = []
     pred_labels = []
-    
+
     for speaker_id, audio_files in tqdm(test_data.items(), desc="评估模型"):
         for audio_file in audio_files:
             # 识别说话人
-            recognized_speaker, _ = recognize_speaker(audio_file, gmm_models, feature_function)
-            
+            recognized_speaker, _ = recognize_speaker(
+                audio_file, gmm_models, feature_function)
+
             # 记录真实标签和预测标签
             true_labels.append(speaker_id)
             pred_labels.append(recognized_speaker)
-    
+
     # 计算准确率
     accuracy = accuracy_score(true_labels, pred_labels)
-    
+
     return accuracy, true_labels, pred_labels
+
 
 # 主程序
 if __name__ == "__main__":
     print("加载训练数据...")
     train_data, train_speakers = load_speaker_data(TrainDir)
-    
+
     print("加载测试数据...")
     test_data, test_speakers = load_speaker_data(TestDir)
-    
+
     # 特征提取参数 - 存储参数而不是函数
-    mfcc_params = {"n_mfcc": 20, "n_fft": 2048, "hop_length": 512}
-    
+    mfcc_params = {"n_mfcc": 40, "n_fft": 2048, "hop_length": 512}
+
     # 特征提取函数 - 使用较少的MFCC系数
-    feature_function = lambda x: extract_mfcc_features(x, **mfcc_params)
-    
+    def feature_function(x): return extract_mfcc_features(x, **mfcc_params)
+
     print("提取训练数据特征...")
-    train_features = extract_features_for_all_speakers(train_data, feature_function)
-    
+    train_features = extract_features_for_all_speakers(
+        train_data, feature_function)
+
     print("训练GMM模型...")
-    gmm_models = train_gmm_models(train_features, n_components=1, reg_covar=1e-1)  # 降低组件数量，增加正则化
-    
+    gmm_models = train_gmm_models(
+        train_features, n_components=1, reg_covar=1e-1)  # 降低组件数量，增加正则化
+
     print("评估模型...")
-    accuracy, true_labels, pred_labels = evaluate_model(test_data, gmm_models, feature_function)
-    
+    accuracy, true_labels, pred_labels = evaluate_model(
+        test_data, gmm_models, feature_function)
+
     print(f"\n测试集准确率: {accuracy*100:.2f}%")
-    
+
     # 绘制混淆矩阵 - 因为说话人太多，只绘制部分说话人
     speaker_subset = train_speakers[:30]  # 只取前30个说话人进行可视化
     # 筛选标签只包含这些说话人的样本
-    subset_indices = [i for i, label in enumerate(true_labels) if label in speaker_subset]
+    subset_indices = [i for i, label in enumerate(
+        true_labels) if label in speaker_subset]
     subset_true_labels = [true_labels[i] for i in subset_indices]
     subset_pred_labels = [pred_labels[i] for i in subset_indices]
-    
-    cm = confusion_matrix(subset_true_labels, subset_pred_labels, labels=speaker_subset)
+
+    cm = confusion_matrix(subset_true_labels,
+                          subset_pred_labels, labels=speaker_subset)
     plt.figure(figsize=(12, 10))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                 xticklabels=speaker_subset, yticklabels=speaker_subset)
     plt.xlabel('预测标签')
     plt.ylabel('真实标签')
@@ -304,25 +325,23 @@ if __name__ == "__main__":
     plt.yticks(rotation=0)
     plt.tight_layout()
     plt.savefig('confusion_matrix.png')
-    
-    
-    #TODO 保存模型
-    
-    
+
+    # TODO 保存模型
+
     # 对不同组件数量的GMM模型进行实验
     # components = [1, 2, 4, 8]  # 从更小的组件数量开始
     # accuracies = []
-    
+
     # for n_components in components:
     #     print(f"\n训练 {n_components} 个组件的GMM模型...")
     #     gmm_models = train_gmm_models(train_features, n_components=n_components, reg_covar=1e-1)
-        
+
     #     print("评估模型...")
     #     accuracy, _, _ = evaluate_model(test_data, gmm_models, feature_function)
     #     accuracies.append(accuracy)
-        
+
     #     print(f"组件数量: {n_components}, 准确率: {accuracy*100:.2f}%")
-    
+
     # 绘制不同组件数量的准确率比较图
     # plt.figure(figsize=(10, 6))
     # plt.plot(components, accuracies, 'bo-', linewidth=2)
@@ -331,10 +350,10 @@ if __name__ == "__main__":
     # plt.ylabel('准确率')
     # plt.grid(True)
     # plt.savefig('gmm_components_comparison.png')
-    
+
     # 实验不同特征提取方法
     # print("\n比较不同特征提取方法...")
-    
+
     # # # 定义不同的特征提取函数
     # def extract_mfcc_delta_features(audio_file):
     #     """提取MFCC及其一阶和二阶差分特征"""
@@ -344,70 +363,69 @@ if __name__ == "__main__":
     #     delta2 = librosa.feature.delta(mfcc, order=2)
     #     combined = np.vstack([np.mean(mfcc, axis=1), np.mean(delta, axis=1), np.mean(delta2, axis=1)])
     #     return combined.flatten()
-    
+
     # def extract_spectral_features(audio_file):
     #     """提取频谱特征"""
     #     audio, sr = librosa.load(audio_file, sr=None)
     #     # 提取短时傅里叶变换
     #     stft = np.abs(librosa.stft(audio))
-        
+
     #     # 计算频谱质心
     #     cent = librosa.feature.spectral_centroid(S=stft, sr=sr)
     #     # 计算频谱平展度
     #     flat = librosa.feature.spectral_flatness(S=stft)
     #     # 计算频谱对比度
     #     contrast = librosa.feature.spectral_contrast(S=stft, sr=sr)
-        
+
     #     # 计算均值 - 修复不同维度的问题
     #     centroid_mean = np.mean(cent, axis=1)           # 形状为 (1,)
     #     flatness_mean = np.mean(flat, axis=1)           # 形状为 (1,)
     #     contrast_mean = np.mean(contrast, axis=1)       # 形状为 (7,) 对于部分音频
-        
+
     #     # 将所有特征展平并连接
     #     features = np.concatenate([centroid_mean, flatness_mean, contrast_mean])
-        
+
     #     return features
-    
+
     # 定义要比较的特征提取方法
     # feature_methods = {
     #     "MFCC": lambda x: extract_mfcc_features(x, **mfcc_params),
     #     "MFCC+Delta": extract_mfcc_delta_features,
     #     "Spectral": extract_spectral_features
     # }
-    
+
     # 比较不同特征提取方法
     # feature_accuracies = {}
-    
+
     # for method_name, method_func in feature_methods.items():
     #     print(f"\n使用 {method_name} 特征...")
-        
+
     #     print("提取训练数据特征...")
     #     train_features = extract_features_for_all_speakers(train_data, method_func)
-        
+
     #     print("训练GMM模型...")
     #     gmm_models = train_gmm_models(train_features, n_components=4, reg_covar=1e-1)
-        
+
     #     print("评估模型...")
     #     accuracy, _, _ = evaluate_model(test_data, gmm_models, method_func)
     #     feature_accuracies[method_name] = accuracy
-        
+
     #     print(f"特征方法: {method_name}, 准确率: {accuracy*100:.2f}%")
-    
+
     # 绘制不同特征方法的准确率比较图
     # plt.figure(figsize=(10, 6))
     # methods = list(feature_accuracies.keys())
     # accs = [feature_accuracies[m] for m in methods]
-    
+
     # plt.bar(methods, accs)
     # plt.title('不同特征提取方法的准确率比较')
     # plt.xlabel('特征提取方法')
     # plt.ylabel('准确率')
     # plt.ylim(0, 1)
-    
+
     # 在柱状图上添加准确率标签
     # for i, v in enumerate(accs):
     #     plt.text(i, v + 0.02, f'{v*100:.2f}%', ha='center')
-    
+
     # plt.tight_layout()
     # plt.savefig('feature_methods_comparison.png')
-
