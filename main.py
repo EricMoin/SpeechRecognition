@@ -35,6 +35,18 @@ from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
 import pickle
 import seaborn as sns
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import torchaudio
+from torchvision.models import resnet18, ResNet18_Weights
+from sklearn.preprocessing import LabelEncoder
+import random
+from torch.utils.tensorboard import SummaryWriter
+import time
+import torch.nn.functional as F
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # 指定默认中文字体
 plt.rcParams['axes.unicode_minus'] = False    # 解决负号显示问题
@@ -50,382 +62,544 @@ os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 # 说话者ID：3个大写字母+1个阿拉伯数字
 # 句子ID：句子类型（SA/SI/SX）+编号
 
-# 上述链接下载的数据集已经
 TrainDir = "Dataset/TRAIN"
 TestDir = "Dataset/TEST"
-# 请在这里写代码加载我们划分好的TIMIT训练集和测试集。或者原始完整版数据集。
 
-# 1. 数据加载函数
-
-
-def load_speaker_data(data_dir):
-    """
-    加载所有说话人的音频数据和对应的标签
-
-    Args:
-        data_dir: 数据目录路径
-
-    Returns:
-        speakers_data: 包含所有说话人音频路径的字典
-        speakers_list: 所有说话人ID的列表
-    """
-    speakers_data = {}
-
-    # 遍历所有方言区域
-    for dialect_region in os.listdir(data_dir):
-        dialect_path = os.path.join(data_dir, dialect_region)
-        if not os.path.isdir(dialect_path):
-            continue
-
-        # 遍历每个说话人
-        for speaker_id in os.listdir(dialect_path):
-            speaker_path = os.path.join(dialect_path, speaker_id)
-            if not os.path.isdir(speaker_path):
-                continue
-
-            # 获取说话人的所有音频文件
-            audio_files = glob.glob(os.path.join(speaker_path, "*.wav"))
-
-            if speaker_id not in speakers_data:
-                speakers_data[speaker_id] = []
-
-            speakers_data[speaker_id].extend(audio_files)
-
-    speakers_list = list(speakers_data.keys())
-    print(f"共加载了 {len(speakers_list)} 个说话人的数据")
-
-    return speakers_data, speakers_list
-
-# 2. 特征提取函数
+# 设置随机种子，确保结果可复现
 
 
-def extract_mfcc_features(audio_file, n_mfcc=13, n_fft=2048, hop_length=512):
-    audio, sr = librosa.load(audio_file, sr=None)
-
-    # MFCC及其差分
-    mfcc = librosa.feature.mfcc(
-        y=audio, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
-    delta = librosa.feature.delta(mfcc)
-    delta2 = librosa.feature.delta(mfcc, order=2)
-
-    # 梅尔频谱能量
-    # mel_spectrogram = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=n_fft, hop_length=hop_length)
-    # log_mel = librosa.power_to_db(mel_spectrogram, ref=np.max)
-
-    # 过零率
-    # zcr = librosa.feature.zero_crossing_rate(audio, frame_length=n_fft, hop_length=hop_length)
-
-    # 能量
-    # rms = librosa.feature.rms(y=audio, frame_length=n_fft, hop_length=hop_length)
-
-    # 合并所有特征
-    features = np.concatenate([
-        mfcc,
-        delta,
-        delta2,
-        # log_mel,
-        # zcr,
-        # rms
-    ], axis=0)
-
-    # 统计池化（均值 + 标准差）
-    features_mean = np.mean(features, axis=1)
-    features_std = np.std(features, axis=1)
-    features = np.concatenate([features_mean, features_std])
-
-    return features
-
-# 3. 提取所有说话人的特征
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
-def extract_features_for_all_speakers(speakers_data, feature_function):
-    """
-    为所有说话人提取特征
+set_seed()
 
-    Args:
-        speakers_data: 包含所有说话人音频路径的字典
-        feature_function: 特征提取函数
+# 检查是否有可用的GPU
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-    Returns:
-        features_dict: 包含所有说话人特征的字典
-    """
-    # 创建一个字典来存储所有说话人的特征
-    # 每个说话人对应一个特征列表，列表长度等于其音频文件数量。
-    # 每个特征向量的形状由 feature_function 决定（如 MFCC 的 13 维向量）
-    features_dict = {}
-
-    for speaker_id, audio_files in tqdm(speakers_data.items(), desc="提取特征"):
-        features_dict[speaker_id] = []
-
-        for audio_file in audio_files:
-            features = feature_function(audio_file)
-            features_dict[speaker_id].append(features)
-
-    return features_dict
-
-# 4. 训练GMM模型
+# 定义音频增强函数
 
 
-def train_gmm_models(features_dict, n_components=8, reg_covar=1e-2):
-    """
-    为每个说话人训练GMM模型
+def augment_audio(waveform, sample_rate=16000):
+    """应用音频增强技术"""
+    if isinstance(waveform, torch.Tensor):
+        waveform = waveform.numpy()
 
-    Args:
-        features_dict: 包含所有说话人特征的字典
-        n_components: GMM组件数量
-        reg_covar: 协方差矩阵正则化参数
+    augment_type = random.randint(0, 4)
 
-    Returns:
-        gmm_models: 包含所有说话人GMM模型的字典
-    """
-    gmm_models = {}
+    if augment_type == 0:
+        # 添加高斯噪声
+        noise_level = 0.005
+        noise = np.random.randn(*waveform.shape) * noise_level
+        waveform = waveform + noise
+    elif augment_type == 1:
+        # 时间拉伸 (0.9-1.1)
+        stretch_factor = random.uniform(0.9, 1.1)
+        waveform = librosa.effects.time_stretch(waveform, rate=stretch_factor)
+        # 确保长度一致
+        if len(waveform) > sample_rate * 3:
+            waveform = waveform[:sample_rate * 3]
+        else:
+            waveform = np.pad(
+                waveform, (0, max(0, sample_rate * 3 - len(waveform))))
+    elif augment_type == 2:
+        # 音高变化 (-2到2半音)
+        pitch_shift = random.randint(-2, 2)
+        waveform = librosa.effects.pitch_shift(
+            waveform, sr=sample_rate, n_steps=pitch_shift)
+    elif augment_type == 3:
+        # 随机静音片段
+        silence_length = int(random.uniform(0.05, 0.15) * waveform.shape[0])
+        start_idx = random.randint(0, waveform.shape[0] - silence_length)
+        waveform[start_idx:start_idx + silence_length] = 0
 
-    for speaker_id, features in tqdm(features_dict.items(), desc="训练GMM模型"):
-        # 将特征列表转换为二维数组
-        X = np.array(features)
+    return waveform
 
-        # 根据样本数量动态调整组件数量
-        # GMM组件数量不能超过样本数量
-        actual_n_components = min(n_components, max(
-            1, X.shape[0] - 1))  # 至少保留1个组件，且不超过样本数-1
-        if actual_n_components < n_components:
-            raise ValueError(
-                f"组件数量为 {actual_n_components}，与样本数量不一致: {X.shape[0]}")
+# 定义提取MFCC特征的函数
 
-        # 训练GMM模型，增加正则化参数
-        # GMM
-        # @n_components ：组件数量越大，模型复杂度越高
-        # covariance_type ：
-        # @diag ：协方差矩阵为对角阵（计算快，假设特征间无相关性）。
-        # @full ：协方差矩阵为全矩阵（更灵活，但参数更多）。
-        # @reg_covar ：协方差矩阵的正则化项（防止数值不稳定，如协方差为零）
-        gmm = GaussianMixture(
-            n_components=actual_n_components,
-            covariance_type='diag',
-            random_state=42,
-            max_iter=200,
-            reg_covar=reg_covar  # 增加协方差正则化参数
+
+def extract_mfcc_features(file_path, n_mfcc=20, n_fft=1024, hop_length=256):
+    """从音频文件中提取MFCC特征及其delta和delta-delta"""
+    try:
+        waveform, sample_rate = librosa.load(file_path, sr=16000)
+
+        # 提取MFCC特征
+        mfcc = librosa.feature.mfcc(
+            y=waveform,
+            sr=sample_rate,
+            n_mfcc=n_mfcc,
+            n_fft=n_fft,
+            hop_length=hop_length
         )
-        gmm.fit(X.reshape(X.shape[0], -1))
-        gmm_models[speaker_id] = gmm
 
-    return gmm_models
+        # 添加delta和delta-delta特征
+        delta_mfcc = librosa.feature.delta(mfcc)
+        delta2_mfcc = librosa.feature.delta(mfcc, order=2)
 
-# 5. 识别说话人
+        # 将三者叠加在一起
+        features = np.concatenate(
+            [mfcc, delta_mfcc, delta2_mfcc], axis=0)  # [3*n_mfcc, time]
 
+        return features
 
-def recognize_speaker(audio_file, gmm_models, feature_function):
-    """
-    识别给定音频的说话人
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+        # 返回一个空数组，后续会在数据集中处理这个错误
+        return np.array([])
 
-    Args:
-        audio_file: 音频文件路径
-        gmm_models: 包含所有说话人GMM模型的字典
-        feature_function: 特征提取函数
-
-    Returns:
-        recognized_speaker: 识别出的说话人ID
-        scores: 所有说话人的得分
-    """
-    # 提取特征
-    features = feature_function(audio_file)
-
-    # 计算每个说话人模型的得分
-    scores = {}
-    for speaker_id, gmm in gmm_models.items():
-        # score = log(P(audio | model))，概率越高，得分越大。
-        scores[speaker_id] = gmm.score(features.reshape(1, -1))
-
-    # 选择得分最高的说话人
-    recognized_speaker = max(scores, key=scores.get)
-
-    return recognized_speaker, scores
-
-# 6. 评估模型
+# 创建数据集类
 
 
-def evaluate_model(test_data, gmm_models, feature_function):
-    """
-    评估模型在测试集上的性能
+class SpeakerDataset(Dataset):
+    def __init__(self, root_dir, transform=None, is_train=True):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.is_train = is_train
+        self.file_paths = []
+        self.labels = []
+        self.label_encoder = LabelEncoder()
 
-    Args:
-        test_data: 测试数据集
-        gmm_models: 包含所有说话人GMM模型的字典
-        feature_function: 特征提取函数
+        # 收集所有话者和其对应的音频文件
+        self._collect_data()
 
-    Returns:
-        accuracy: 准确率
-        true_labels: 真实标签列表
-        pred_labels: 预测标签列表
-    """
-    true_labels = []
-    pred_labels = []
+    def _collect_data(self):
+        """收集所有音频文件和对应的说话人标签"""
+        speaker_dirs = []
+        for dialect in os.listdir(self.root_dir):
+            dialect_path = os.path.join(self.root_dir, dialect)
+            if os.path.isdir(dialect_path):
+                for speaker in os.listdir(dialect_path):
+                    speaker_path = os.path.join(dialect_path, speaker)
+                    if os.path.isdir(speaker_path):
+                        speaker_dirs.append((speaker, speaker_path))
 
-    for speaker_id, audio_files in tqdm(test_data.items(), desc="评估模型"):
-        for audio_file in audio_files:
-            # 识别说话人
-            recognized_speaker, _ = recognize_speaker(
-                audio_file, gmm_models, feature_function)
+        # 为每个说话人收集音频文件
+        for speaker, speaker_path in speaker_dirs:
+            audio_files = [f for f in os.listdir(speaker_path) if f.endswith(
+                '.wav') and f != 'merge_result.wav']
 
-            # 记录真实标签和预测标签
-            true_labels.append(speaker_id)
-            pred_labels.append(recognized_speaker)
+            # 添加所有音频文件和对应标签
+            for audio_file in audio_files:
+                file_path = os.path.join(speaker_path, audio_file)
+                self.file_paths.append(file_path)
+                self.labels.append(speaker)
 
-    # 计算准确率
-    accuracy = accuracy_score(true_labels, pred_labels)
+        # 编码标签
+        self.label_encoder.fit(self.labels)
+        self.labels = self.label_encoder.transform(self.labels)
+        self.num_classes = len(self.label_encoder.classes_)
+        print(f"找到{self.num_classes}个说话人, {len(self.file_paths)}个音频文件")
 
-    return accuracy, true_labels, pred_labels
+        # 保存标签编码器
+        with open('label_encoder.pkl', 'wb') as f:
+            pickle.dump(self.label_encoder, f)
+
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, idx):
+        file_path = self.file_paths[idx]
+        label = self.labels[idx]
+
+        # 提取MFCC特征及其delta和delta-delta
+        features = extract_mfcc_features(file_path)
+
+        # 处理提取失败的情况
+        if features.size == 0:
+            # 如果提取失败，返回一个全零特征
+            # 60 = 3 * 20 (MFCC + delta + delta2)
+            features = np.zeros((60, 300))
+
+        # 确保所有特征大小一致，通过填充或截断
+        target_length = 300  # 设置一个固定长度
+        if features.shape[1] < target_length:
+            pad_width = target_length - features.shape[1]
+            features = np.pad(
+                features, ((0, 0), (0, pad_width)), mode='constant')
+        else:
+            features = features[:, :target_length]
+
+        # 标准化
+        features = (features - np.mean(features)) / (np.std(features) + 1e-8)
+
+        # 增加通道维度，并转换为PyTorch张量
+        features = torch.FloatTensor(
+            features).unsqueeze(0)  # [1, 3*n_mfcc, time]
+        label = torch.tensor(label, dtype=torch.long)
+
+        return features, label
+
+# 简化的ResNet模型
 
 
-# 主程序
-if __name__ == "__main__":
-    print("加载训练数据...")
-    train_data, train_speakers = load_speaker_data(TrainDir)
+class SimplerResNetSpeaker(nn.Module):
+    def __init__(self, num_classes):
+        super(SimplerResNetSpeaker, self).__init__()
 
-    print("加载测试数据...")
-    test_data, test_speakers = load_speaker_data(TestDir)
+        # 基本的卷积块
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-    # 特征提取参数 - 存储参数而不是函数
-    mfcc_params = {"n_mfcc": 40, "n_fft": 2048, "hop_length": 512}
+        # ResNet风格的块
+        self.layer1 = self._make_layer(32, 64, 2)
+        self.layer2 = self._make_layer(64, 128, 2)
+        self.layer3 = self._make_layer(128, 256, 2)
 
-    # 特征提取函数 - 使用较少的MFCC系数
-    def feature_function(x): return extract_mfcc_features(x, **mfcc_params)
+        # 全局池化
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
-    print("提取训练数据特征...")
-    train_features = extract_features_for_all_speakers(
-        train_data, feature_function)
+        # 分类器
+        self.fc = nn.Sequential(
+            nn.Linear(256, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes)
+        )
 
-    print("训练GMM模型...")
-    gmm_models = train_gmm_models(
-        train_features, n_components=1, reg_covar=1e-1)  # 降低组件数量，增加正则化
+    def _make_layer(self, in_channels, out_channels, blocks):
+        layers = []
+        # 第一个块可能改变通道数
+        layers.append(ResBlock(in_channels, out_channels, stride=1))
+        # 其余块保持通道数不变
+        for _ in range(1, blocks):
+            layers.append(ResBlock(out_channels, out_channels, stride=1))
+        return nn.Sequential(*layers)
 
-    print("评估模型...")
-    accuracy, true_labels, pred_labels = evaluate_model(
-        test_data, gmm_models, feature_function)
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
 
-    print(f"\n测试集准确率: {accuracy*100:.2f}%")
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
 
-    # 绘制混淆矩阵 - 因为说话人太多，只绘制部分说话人
-    speaker_subset = train_speakers[:30]  # 只取前30个说话人进行可视化
-    # 筛选标签只包含这些说话人的样本
-    subset_indices = [i for i, label in enumerate(
-        true_labels) if label in speaker_subset]
-    subset_true_labels = [true_labels[i] for i in subset_indices]
-    subset_pred_labels = [pred_labels[i] for i in subset_indices]
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
 
-    cm = confusion_matrix(subset_true_labels,
-                          subset_pred_labels, labels=speaker_subset)
-    plt.figure(figsize=(12, 10))
+        return x
+
+# ResNet基本块
+
+
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ResBlock, self).__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+        self.conv2 = nn.Conv2d(out_channels, out_channels,
+                               kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # 如果输入和输出通道数不同，添加一个投影捷径
+        self.shortcut = nn.Sequential()
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels,
+                          kernel_size=1, stride=1, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out += self.shortcut(identity)
+        out = self.relu(out)
+
+        return out
+
+# 训练模型
+
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=25, patience=7):
+    writer = SummaryWriter('runs/speaker_recognition_resnet')
+
+    since = time.time()
+    best_acc = 0.0
+    best_model_weights = None
+
+    # 早停机制
+    no_improve_epochs = 0
+
+    for epoch in range(num_epochs):
+        print(f'Epoch {epoch}/{num_epochs - 1}')
+        print('-' * 10)
+
+        # 训练阶段
+        model.train()
+        running_loss = 0.0
+        running_corrects = 0
+
+        # 进度条
+        progress_bar = tqdm(train_loader, desc=f"Training")
+
+        for inputs, labels in progress_bar:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+
+            # 梯度清零
+            optimizer.zero_grad()
+
+            # 前向传播
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            loss = criterion(outputs, labels)
+
+            # 反向传播和优化
+            loss.backward()
+            # 梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            # 统计
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
+
+            progress_bar.set_postfix({"loss": loss.item(), "acc": torch.sum(
+                preds == labels.data).item() / inputs.size(0)})
+
+        epoch_loss = running_loss / len(train_loader.dataset)
+        epoch_acc = running_corrects.double() / len(train_loader.dataset)
+
+        print(f'Train Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+        writer.add_scalar('Loss/train', epoch_loss, epoch)
+        writer.add_scalar('Accuracy/train', epoch_acc, epoch)
+
+        # 验证阶段
+        model.eval()
+        running_loss = 0.0
+        running_corrects = 0
+
+        with torch.no_grad():
+            for inputs, labels in tqdm(val_loader, desc="Validation"):
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+
+                outputs = model(inputs)
+                _, preds = torch.max(outputs, 1)
+                loss = criterion(outputs, labels)
+
+                running_loss += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels.data)
+
+        epoch_loss = running_loss / len(val_loader.dataset)
+        epoch_acc = running_corrects.double() / len(val_loader.dataset)
+
+        print(f'Val Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+        writer.add_scalar('Loss/validation', epoch_loss, epoch)
+        writer.add_scalar('Accuracy/validation', epoch_acc, epoch)
+
+        # 学习率调整
+        scheduler.step()
+
+        # 保存最佳模型
+        if epoch_acc > best_acc:
+            best_acc = epoch_acc
+            best_model_weights = model.state_dict().copy()
+            torch.save(best_model_weights, 'best_speaker_model.pth')
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
+
+        # 早停
+        if no_improve_epochs >= patience:
+            print(f'Early stopping triggered after {epoch + 1} epochs')
+            break
+
+    time_elapsed = time.time() - since
+    print(
+        f'Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s')
+    print(f'Best val Acc: {best_acc:.4f}')
+
+    # 加载最佳模型权重
+    model.load_state_dict(best_model_weights)
+    return model
+
+# 评估模型函数
+
+
+def evaluate_model(model, test_loader, criterion):
+    model.eval()
+    running_loss = 0.0
+    running_corrects = 0
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for inputs, labels in tqdm(test_loader, desc="Testing"):
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            loss = criterion(outputs, labels)
+
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    test_loss = running_loss / len(test_loader.dataset)
+    test_acc = running_corrects.double() / len(test_loader.dataset)
+
+    print(f'Test Loss: {test_loss:.4f} Acc: {test_acc:.4f}')
+
+    return test_acc, all_preds, all_labels
+
+# 绘制混淆矩阵
+
+
+def plot_confusion_matrix(y_true, y_pred, classes, top_n=30):
+    """绘制前top_n个最常见说话人的混淆矩阵"""
+    # 计算每个说话人在测试集中的出现次数
+    class_counts = {}
+    for label in y_true:
+        if label in class_counts:
+            class_counts[label] += 1
+        else:
+            class_counts[label] = 1
+
+    # 获取出现次数最多的top_n个说话人
+    top_classes_idx = sorted(
+        class_counts.keys(), key=lambda x: class_counts[x], reverse=True)[:top_n]
+
+    # 筛选这些说话人的预测结果
+    mask = np.isin(y_true, top_classes_idx)
+    filtered_y_true = np.array(y_true)[mask]
+    filtered_y_pred = np.array(y_pred)[mask]
+
+    # 获取这些说话人的类别名称
+    top_classes = [classes[idx] for idx in top_classes_idx]
+
+    # 计算混淆矩阵
+    cm = confusion_matrix(filtered_y_true, filtered_y_pred,
+                          labels=top_classes_idx)
+
+    # 绘制混淆矩阵
+    plt.figure(figsize=(20, 20))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=speaker_subset, yticklabels=speaker_subset)
+                xticklabels=top_classes, yticklabels=top_classes)
     plt.xlabel('预测标签')
     plt.ylabel('真实标签')
-    plt.title('说话人识别混淆矩阵 (部分说话人)')
+    plt.title(f'说话人识别混淆矩阵 (Top {top_n})')
+    plt.savefig('confusion_matrix.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 计算每个说话人的准确率
+    per_class_accuracy = {}
+    for i, class_idx in enumerate(top_classes_idx):
+        class_true = np.where(filtered_y_true == class_idx)[0]
+        if len(class_true) > 0:
+            correct = np.sum(filtered_y_pred[class_true] == class_idx)
+            per_class_accuracy[classes[class_idx]] = correct / len(class_true)
+
+    # 绘制每个说话人的准确率
+    plt.figure(figsize=(15, 8))
+    speakers = list(per_class_accuracy.keys())
+    accuracies = list(per_class_accuracy.values())
+
+    # 按准确率排序
+    sorted_indices = np.argsort(accuracies)[::-1]
+    speakers = [speakers[i] for i in sorted_indices]
+    accuracies = [accuracies[i] for i in sorted_indices]
+
+    plt.bar(speakers, accuracies)
+    plt.xlabel('说话人')
+    plt.ylabel('准确率')
+    plt.title('每个说话人的识别准确率')
     plt.xticks(rotation=90)
-    plt.yticks(rotation=0)
     plt.tight_layout()
-    plt.savefig('confusion_matrix.png')
+    plt.savefig('per_speaker_accuracy.png', dpi=300)
+    plt.close()
 
-    # TODO 保存模型
+# 主函数
 
-    # 对不同组件数量的GMM模型进行实验
-    # components = [1, 2, 4, 8]  # 从更小的组件数量开始
-    # accuracies = []
 
-    # for n_components in components:
-    #     print(f"\n训练 {n_components} 个组件的GMM模型...")
-    #     gmm_models = train_gmm_models(train_features, n_components=n_components, reg_covar=1e-1)
+def main():
+    # 创建数据集和数据加载器
+    train_dataset = SpeakerDataset(TrainDir, is_train=True)
+    test_dataset = SpeakerDataset(TestDir, is_train=False)
 
-    #     print("评估模型...")
-    #     accuracy, _, _ = evaluate_model(test_data, gmm_models, feature_function)
-    #     accuracies.append(accuracy)
+    # 获取说话人类别映射
+    speaker_classes = train_dataset.label_encoder.classes_
+    num_classes = len(speaker_classes)
 
-    #     print(f"组件数量: {n_components}, 准确率: {accuracy*100:.2f}%")
+    # 划分训练集和验证集 (80% 训练, 20% 验证)
+    train_size = int(0.8 * len(train_dataset))
+    val_size = len(train_dataset) - train_size
+    train_subset, val_subset = torch.utils.data.random_split(
+        train_dataset, [train_size, val_size])
 
-    # 绘制不同组件数量的准确率比较图
-    # plt.figure(figsize=(10, 6))
-    # plt.plot(components, accuracies, 'bo-', linewidth=2)
-    # plt.title('不同GMM组件数量的准确率比较')
-    # plt.xlabel('GMM组件数量')
-    # plt.ylabel('准确率')
-    # plt.grid(True)
-    # plt.savefig('gmm_components_comparison.png')
+    # 创建数据加载器
+    train_loader = DataLoader(
+        train_subset, batch_size=64, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_subset, batch_size=64,
+                            shuffle=False, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=64,
+                             shuffle=False, num_workers=2)
 
-    # 实验不同特征提取方法
-    # print("\n比较不同特征提取方法...")
+    # 创建简化的ResNet模型实例
+    model = SimplerResNetSpeaker(num_classes=num_classes)
+    model = model.to(device)
 
-    # # # 定义不同的特征提取函数
-    # def extract_mfcc_delta_features(audio_file):
-    #     """提取MFCC及其一阶和二阶差分特征"""
-    #     audio, sr = librosa.load(audio_file, sr=None)
-    #     mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
-    #     delta = librosa.feature.delta(mfcc)
-    #     delta2 = librosa.feature.delta(mfcc, order=2)
-    #     combined = np.vstack([np.mean(mfcc, axis=1), np.mean(delta, axis=1), np.mean(delta2, axis=1)])
-    #     return combined.flatten()
+    # 打印模型参数量
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"模型总参数量: {total_params}")
 
-    # def extract_spectral_features(audio_file):
-    #     """提取频谱特征"""
-    #     audio, sr = librosa.load(audio_file, sr=None)
-    #     # 提取短时傅里叶变换
-    #     stft = np.abs(librosa.stft(audio))
+    # 定义损失函数和优化器
+    criterion = nn.CrossEntropyLoss()  # 对于平衡数据集使用标准交叉熵损失
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    scheduler = CosineAnnealingLR(optimizer, T_max=30, eta_min=1e-6)
 
-    #     # 计算频谱质心
-    #     cent = librosa.feature.spectral_centroid(S=stft, sr=sr)
-    #     # 计算频谱平展度
-    #     flat = librosa.feature.spectral_flatness(S=stft)
-    #     # 计算频谱对比度
-    #     contrast = librosa.feature.spectral_contrast(S=stft, sr=sr)
+    # 训练模型
+    print("开始训练模型...")
+    model = train_model(model, train_loader, val_loader, criterion,
+                        optimizer, scheduler, num_epochs=50, patience=7)
 
-    #     # 计算均值 - 修复不同维度的问题
-    #     centroid_mean = np.mean(cent, axis=1)           # 形状为 (1,)
-    #     flatness_mean = np.mean(flat, axis=1)           # 形状为 (1,)
-    #     contrast_mean = np.mean(contrast, axis=1)       # 形状为 (7,) 对于部分音频
+    # 评估模型
+    print("在测试集上评估模型...")
+    test_acc, all_preds, all_labels = evaluate_model(
+        model, test_loader, criterion)
 
-    #     # 将所有特征展平并连接
-    #     features = np.concatenate([centroid_mean, flatness_mean, contrast_mean])
+    # 绘制混淆矩阵和每个说话人的准确率
+    plot_confusion_matrix(all_labels, all_preds, speaker_classes, top_n=20)
 
-    #     return features
+    # 保存结果
+    results = {
+        'accuracy': test_acc.item(),
+        'predictions': all_preds,
+        'true_labels': all_labels,
+        'speaker_classes': speaker_classes
+    }
+    with open('resnet_speaker_recognition_results.pkl', 'wb') as f:
+        pickle.dump(results, f)
 
-    # 定义要比较的特征提取方法
-    # feature_methods = {
-    #     "MFCC": lambda x: extract_mfcc_features(x, **mfcc_params),
-    #     "MFCC+Delta": extract_mfcc_delta_features,
-    #     "Spectral": extract_spectral_features
-    # }
+    print(f"最终测试准确率: {test_acc:.4f}")
+    print("模型训练和评估完成，结果已保存。")
 
-    # 比较不同特征提取方法
-    # feature_accuracies = {}
 
-    # for method_name, method_func in feature_methods.items():
-    #     print(f"\n使用 {method_name} 特征...")
-
-    #     print("提取训练数据特征...")
-    #     train_features = extract_features_for_all_speakers(train_data, method_func)
-
-    #     print("训练GMM模型...")
-    #     gmm_models = train_gmm_models(train_features, n_components=4, reg_covar=1e-1)
-
-    #     print("评估模型...")
-    #     accuracy, _, _ = evaluate_model(test_data, gmm_models, method_func)
-    #     feature_accuracies[method_name] = accuracy
-
-    #     print(f"特征方法: {method_name}, 准确率: {accuracy*100:.2f}%")
-
-    # 绘制不同特征方法的准确率比较图
-    # plt.figure(figsize=(10, 6))
-    # methods = list(feature_accuracies.keys())
-    # accs = [feature_accuracies[m] for m in methods]
-
-    # plt.bar(methods, accs)
-    # plt.title('不同特征提取方法的准确率比较')
-    # plt.xlabel('特征提取方法')
-    # plt.ylabel('准确率')
-    # plt.ylim(0, 1)
-
-    # 在柱状图上添加准确率标签
-    # for i, v in enumerate(accs):
-    #     plt.text(i, v + 0.02, f'{v*100:.2f}%', ha='center')
-
-    # plt.tight_layout()
-    # plt.savefig('feature_methods_comparison.png')
+if __name__ == "__main__":
+    main()
